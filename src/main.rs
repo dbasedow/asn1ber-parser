@@ -5,6 +5,74 @@ use std::fs::File;
 use std::io::Read;
 use std::env;
 use std::mem::size_of;
+use std::fmt::Debug;
+use std::fmt::Formatter;
+use std::fmt;
+use sha2::{Sha256, Digest};
+
+enum ASN1Type {
+    Sequence(Vec<ASN1Type>),
+    ObjectIdentifier(DataElement),
+    Any,
+}
+
+fn is_last_octet(octet: u8) -> bool {
+    octet & 0x80 == 0x00
+}
+
+fn parse_octet_series(input: &[u8]) -> IResult<&[u8], &[u8]> {
+    for i in 0..input.len() {
+        if is_last_octet(input[i]) {
+            return IResult::Done(&input[i + 1..], &input[0..i + 1]);
+        }
+    }
+    return IResult::Error(ErrorKind::Custom(0));
+}
+
+#[test]
+fn test_parse_octet_series() {
+    let d = b"\x86\x48";
+    let (rest, result) = parse_octet_series(d).unwrap();
+    assert_eq!(rest.len(), 0);
+    assert_eq!(result, b"\x86\x48");
+
+    let d = b"\x2a";
+    let (rest, result) = parse_octet_series(d).unwrap();
+    assert_eq!(rest.len(), 0);
+    assert_eq!(result, b"\x2a");
+}
+
+named!(parse_sub_identifiers<&[u8], Vec<&[u8]>>, do_parse!(
+    sub_identifiers: many0!(parse_octet_series) >>
+    (sub_identifiers)
+));
+
+fn decode_object_identifier(data: &[u8]) -> Vec<u32> {
+    let (_, sub_ids) = parse_sub_identifiers(data).unwrap();
+    let mut parts: Vec<u32> = Vec::with_capacity(sub_ids.len());
+    for (i, sub_id) in sub_ids.iter().enumerate() {
+        let mut part: u32 = 0;
+        for (j, d) in sub_id.iter().rev().enumerate() {
+            part |= (*d as u32 & 0x7f) << (j * 7);
+        }
+        if i == 0 {
+            let y = part % 40;
+            let x = part / 40;
+            parts.push(x);
+            parts.push(y);
+        } else {
+            parts.push(part);
+        }
+    }
+    parts
+}
+
+#[test]
+fn test_decode_object_identifier() {
+    let d = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x02];
+    let r = decode_object_identifier(&d);
+    assert_eq!(r, [1, 2, 840, 113549, 1, 7, 2]);
+}
 
 #[derive(Debug)]
 struct DataElement {
@@ -12,6 +80,12 @@ struct DataElement {
     constructed: bool,
     id: u32,
     data: Vec<u8>,
+}
+
+impl DataElement {
+    fn parse_data(&self) -> IResult<&[u8], Vec<DataElement>> {
+        parse_data_elements(&self.data)
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -88,7 +162,7 @@ fn parse_length(input: &[u8]) -> IResult<&[u8], usize> {
         for i in 1..=length_length {
             length |= (input[i] as usize) << ((length_length - i) * 8);
         }
-        rest = &input[length_length+1..];
+        rest = &input[length_length + 1..];
     }
     return IResult::Done(rest, length);
 }
@@ -117,12 +191,28 @@ named!(parse_data_element<&[u8], DataElement>, do_parse!(
     })
 ));
 
+named!(parse_data_elements<&[u8], Vec<DataElement>>, do_parse!(
+    elements: many0!(parse_data_element) >>
+    (elements)
+));
+
+fn print_sha256(data: &[u8]) {
+    let mut hasher = Sha256::new();
+    hasher.input(data);
+    println!("{:x?}", hasher.result());
+}
+
 fn main() {
     let fname = env::args().last().unwrap();
     let mut file = File::open(fname).unwrap();
     let mut buf: Vec<u8> = Vec::with_capacity(1000);
     file.read_to_end(&mut buf);
 
-    let r = parse_data_element(&buf[..]).unwrap();
-    println!("{:?}", r);
+    let (_, r) = parse_data_element(&buf[..]).unwrap();
+    let (_, r) = r.parse_data().unwrap();
+    let (_, r) = r[1].parse_data().unwrap();
+    let (_, r) = r[0].parse_data().unwrap();
+    print_sha256(&r[3].data);
+    let (_, r) = r[3].parse_data().unwrap();
+    let (_, r) = r[0].parse_data().unwrap();
 }

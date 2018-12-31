@@ -6,3 +6,4 @@ edition = "2018"
 
 [dependencies]
 nom = "3"
+sha2 = "0.8.0"
